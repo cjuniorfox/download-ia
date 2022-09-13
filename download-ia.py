@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import html
 import math
+import time
 
 platforms=[
         {"name":"saturn","collection":"redump.sega_saturn"},
@@ -45,40 +46,51 @@ def acquire_collection(content_id):
         if content_id < c["size"]:
             return c["collection"]
 
-def download(content_id):
+def get_download_col(content_id):
     if content_id >= len(files):
         print("The requested content does not exist.")
         os._exit(1)
     if isinstance(collection,str):
-        col=collection
+        return collection
     elif isinstance(collection,list):
-        col=acquire_collection(content_id)
-    content=files[content_id]
-    name=Path(content["name"]).stem
-    print("Preparing to download \""+name+"\".")
+        return acquire_collection(content_id)
+
+def prepare_download(col,content):
     response = requests.get('http://archive.org/download/'+col+"/"+content["name"]+'/')
     if response.status_code > 400:
         print("The download request has exited with error",response.status_code,".")
         os._exit(1)
-    content_files=json.loads(extract_content_files(response.text))
-    print("Content list fetched. Downloading the content")
-    if not os.path.exists(name):
-        os.mkdir(name)
+    return json.loads(extract_content_files(response.text))
+
+def download_files(col,content_files,name):
     for f in content_files:
         if "url" in f.keys():
             file_name = f["name"]
             with requests.get("http:"+f["url"], stream=True) as r:
                 r.raise_for_status()
-                with open(os.path.join(name,file_name), 'wb') as f:
+                with open(os.path.join(name,os.path.basename(file_name)), 'wb') as f:
                     dot = ""
                     chunk_size=8192
                     size=0
                     print("Downloading \""+file_name+"\"")
                     for chunk in r.iter_content(chunk_size=chunk_size):
                         size=chunk_size+size
-                        print(" Fetched: ",size_pretty(size),"          \r",end="")
+                        print(" Fetched:",size_pretty(size),"          \r",end="")
                         f.write(chunk)
                     print("")
+
+def download(content_id):
+    start_time = time.time()
+    col=get_download_col(content_id)
+    content=files[content_id]
+    name=Path(content["name"]).stem
+    print("Preparing to download \""+name+"\".")
+    content_files=prepare_download(col,content)
+    print("Content list fetched. Downloading the content")
+    if not os.path.exists(name):
+        os.mkdir(name)
+    download_files(col,content_files,name)
+    print("All files downloaded. Time elapsed:", math.trunc(time.time() - start_time),"seconds.")
 
 def size_pretty(size):
     if (size < 1024):
@@ -90,12 +102,19 @@ def size_pretty(size):
     elif (size > (1024 * 1024 * 1024)):
         return format(math.trunc(size/1024/1024/1024/1024))+" GB"
 
+def validate_json(json_data):
+    try:
+        json.loads(json_data)
+    except ValueError as err:
+        return False
+    return True
+
 def extract_content_files(payload):
     table_html=payload.split("table")
-    result=html.unescape(
-        "["+table_html[1]
+    challenge_json=html.unescape(
+        table_html[1]
             .replace("\n","")
-            .replace("class=\"archext\">","") #undesired content
+            .replace(" class=\"archext\">","") #undesired content
             .replace("<caption>","{\"caption\":\"") #first value is caption
             .replace("</caption>","\"},")
             .replace("<tr><th>file<th>as jpg<th>timestamp<th>size</tr>","") #removing table header
@@ -107,11 +126,17 @@ def extract_content_files(payload):
             .replace("</","") #remove last undesired character
             .replace(">",",\"name\":\"") #name for the link extracted before
             .replace("}{","},{")#comma separated  between objects
-            +"]"
     )
-    print(table_html[1])
-    print(result)
-    os._exit(1)
+    #split resultant json and challenge against validation
+    json_resultant_list = []
+    for d in challenge_json.split("},{"):
+        if validate_json("{"+d+"}"):
+            json_resultant_list.append("{"+d+"}")
+        elif validate_json("{"+d):
+            json_resultant_list.append("{"+d)
+        elif validate_json(d+"}"):
+            json_resultant_list.append(d+"}")
+    return "["+(",".join(json_resultant_list))+"]"
     return result
 
 parser = argparse.ArgumentParser(description="Internet Archive video game console contents downloader")
