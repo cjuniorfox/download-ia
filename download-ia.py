@@ -3,18 +3,33 @@ import requests
 import json
 import argparse
 import os
+from pathlib import Path
+import html
+import math
 
 platforms=[
         {"name":"saturn","collection":"redump.sega_saturn"},
         {"name":"dreamcast","collection":"redump.sega_dreamcast"},
-        {"name":"wii","collection":["wiiusaredump","wiiusaredump2","wiiusaredump3"]}
+        {"name":"wii","multi":[{"collection":"wiiusaredump"},{"collection":"wiiusaredump2"},{"collection":"wiiusaredump3"}]}
     ]
 
 def define_platform(platform):
     global collection
     for p in platforms:
         if platform.lower() in p["name"].lower():
-            collection=p["collection"]
+            if "collection" in p.keys():
+                collection = p["collection"]
+            if "multi" in p.keys() and isinstance(p["multi"], list):
+                collection = p["multi"]
+                start=0
+                i=0
+                files=[]
+                for c in collection:
+                    response_API = requests.get('http://archive.org/metadata/' + c["collection"] + '/files/')
+                    files = files + json.loads(response_API.text)['result']
+                    collection[i]["size"]=len(files)
+                    i=i+1
+                return files
     response_API = requests.get('http://archive.org/metadata/' + collection + '/files/')
     return json.loads(response_API.text)['result']
         
@@ -23,25 +38,63 @@ def search(query):
     print("ID\t Content\n====================")
     for f in files:
         if query.lower() in f["name"].lower():
-            print(i,"\t",f["name"])
+            print(i,"\t",Path(f["name"]).stem)
         i=i+1
+def acquire_collection(content_id):
+    for c in collection:
+        if content_id < c["size"]:
+            return c["collection"]
 
 def download(content_id):
     if content_id >= len(files):
         print("The requested content does not exist.")
         os._exit(1)
+    if isinstance(collection,str):
+        col=collection
+    elif isinstance(collection,list):
+        col=acquire_collection(content_id)
     content=files[content_id]
-    #print(content["name"])
-    response = requests.get('http://archive.org/download/'+collection+"/"+content["name"]+'/')
+    name=Path(content["name"]).stem
+    print("Preparing to download \""+name+"\".")
+    response = requests.get('http://archive.org/download/'+col+"/"+content["name"]+'/')
     if response.status_code > 400:
         print("The download request has exited with error",response.status_code,".")
         os._exit(1)
     content_files=json.loads(extract_content_files(response.text))
+    print("Content list fetched. Downloading the content")
+    if not os.path.exists(name):
+        os.mkdir(name)
+    for f in content_files:
+        if "url" in f.keys():
+            file_name = f["name"]
+            with requests.get("http:"+f["url"], stream=True) as r:
+                r.raise_for_status()
+                with open(os.path.join(name,file_name), 'wb') as f:
+                    dot = ""
+                    chunk_size=8192
+                    size=0
+                    print("Downloading \""+file_name+"\"")
+                    for chunk in r.iter_content(chunk_size=chunk_size):
+                        size=chunk_size+size
+                        print(" Fetched: ",size_pretty(size),"          \r",end="")
+                        f.write(chunk)
+                    print("")
 
-def extract_content_files(html):
-    table_html=html.split("table")
-    return (
+def size_pretty(size):
+    if (size < 1024):
+        return format(math.trunc(size))+" B"
+    elif (size > 1024 and size < (1024 * 1024)):
+        return format(math.trunc(size/1024))+" KB"
+    elif (size > (1024 * 1024) and size < (1024 * 1024 * 1024)):
+        return format(math.trunc(size/1024/1024))+" MB"
+    elif (size > (1024 * 1024 * 1024)):
+        return format(math.trunc(size/1024/1024/1024/1024))+" GB"
+
+def extract_content_files(payload):
+    table_html=payload.split("table")
+    result=html.unescape(
         "["+table_html[1]
+            .replace("\n","")
             .replace("class=\"archext\">","") #undesired content
             .replace("<caption>","{\"caption\":\"") #first value is caption
             .replace("</caption>","\"},")
@@ -53,10 +106,13 @@ def extract_content_files(html):
             .replace("<td id=\"size\">","\",\"size\":\"") #size field
             .replace("</","") #remove last undesired character
             .replace(">",",\"name\":\"") #name for the link extracted before
-            .replace("\n","")
             .replace("}{","},{")#comma separated  between objects
             +"]"
     )
+    print(table_html[1])
+    print(result)
+    os._exit(1)
+    return result
 
 parser = argparse.ArgumentParser(description="Internet Archive video game console contents downloader")
 parser.add_argument("--platform", "-p", metavar="saturn", type=str , help="Video game platform console wanted")
